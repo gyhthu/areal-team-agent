@@ -19,11 +19,21 @@ export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:Tru
 
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
 ADMIN_API_KEY="${ADMIN_API_KEY:-sk-openclaw-npu-dev}"
+PROVIDER_API_KEY="${PROVIDER_API_KEY:-sk-openclaw-provider}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-openclaw-online-npu}"
 TRIAL_NAME="${TRIAL_NAME:-qwen25-1_5b}"
 TOTAL_TRAIN_STEPS="${TOTAL_TRAIN_STEPS:-100}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
+
+export AREAL_PRM_JUDGE_BASE_URL="${AREAL_PRM_JUDGE_BASE_URL:-}"
+export AREAL_PRM_JUDGE_API_KEY="${AREAL_PRM_JUDGE_API_KEY:-}"
+export AREAL_PRM_JUDGE_MODEL="${AREAL_PRM_JUDGE_MODEL:-default}"
+export AREAL_PRM_JUDGE_TIMEOUT="${AREAL_PRM_JUDGE_TIMEOUT:-30}"
+
+echo "OpenClaw provider API key: ${PROVIDER_API_KEY}"
+echo "Use the gateway URL printed by AReaL as the provider baseUrl."
+echo "For OpenAI-compatible clients, use baseUrl=http://<gateway>/v1 and model=default."
 
 python3 examples/openclaw/train.py \
   --config examples/openclaw/config_qwen25_1_5b_npu.yaml \
