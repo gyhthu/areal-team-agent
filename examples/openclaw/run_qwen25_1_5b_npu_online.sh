@@ -19,7 +19,7 @@ export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:Tru
 
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
 ADMIN_API_KEY="${ADMIN_API_KEY:-sk-openclaw-npu-dev}"
-PROVIDER_API_KEY="${PROVIDER_API_KEY:-sk-openclaw-provider}"
+PROVIDER_API_KEY="${PROVIDER_API_KEY:-any-placeholder-key}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-openclaw-online-npu}"
 TRIAL_NAME="${TRIAL_NAME:-qwen25-1_5b}"
 TOTAL_TRAIN_STEPS="${TOTAL_TRAIN_STEPS:-100}"
@@ -33,9 +33,9 @@ export AREAL_PRM_JUDGE_TIMEOUT="${AREAL_PRM_JUDGE_TIMEOUT:-30}"
 export AREAL_PROVIDER_IDLE_TIMEOUT="${AREAL_PROVIDER_IDLE_TIMEOUT:-300}"
 export AREAL_PROVIDER_IDLE_CHECK_INTERVAL="${AREAL_PROVIDER_IDLE_CHECK_INTERVAL:-30}"
 
-echo "OpenClaw provider API key: ${PROVIDER_API_KEY}"
 echo "Use the gateway URL printed by AReaL as the provider baseUrl."
 echo "For OpenAI-compatible clients, use baseUrl=http://<gateway>/v1 and model=default."
+echo "If the client requires an apiKey, any placeholder is fine, e.g. ${PROVIDER_API_KEY}."
 echo "Idle sessions auto-end after ${AREAL_PROVIDER_IDLE_TIMEOUT}s."
 
 python3 examples/openclaw/train.py \

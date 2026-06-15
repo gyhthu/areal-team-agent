@@ -10,6 +10,7 @@ a coordination queue for the online training workflow.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -109,6 +110,7 @@ class _SessionRoute:
 
     worker_addr: str
     session_id: str
+    session_api_key: str
     pending_future: asyncio.Future | None = None  # Future[CompletedSessionInfo]
     last_access: float = 0.0
 
@@ -138,6 +140,12 @@ def _forwarding_headers(raw_headers: dict[str, str]) -> dict[str, str]:
             "x-turn-type",
         ):
             out[key] = value
+    return out
+
+
+def _with_auth_header(headers: dict[str, str], api_key: str) -> dict[str, str]:
+    out = dict(headers)
+    out["authorization"] = f"Bearer {api_key}"
     return out
 
 
@@ -321,10 +329,10 @@ def create_proxy_gateway_app(
         evicted: list[tuple[str, _SessionRoute]],
     ) -> None:
         """Best-effort end backend sessions for evicted routes."""
-        for evicted_key, route in evicted:
+        for _evicted_key, route in evicted:
             try:
                 headers = {
-                    "authorization": f"Bearer {evicted_key}",
+                    "authorization": f"Bearer {route.session_api_key}",
                     "content-type": "application/json",
                 }
                 await _forward(
@@ -351,7 +359,7 @@ def create_proxy_gateway_app(
     async def _end_and_resolve(api_key: str, old_route: _SessionRoute) -> None:
         """End the old session on the worker and resolve the online-mode future."""
         end_headers = {
-            "authorization": f"Bearer {api_key}",
+            "authorization": f"Bearer {old_route.session_api_key}",
             "content-type": "application/json",
         }
         end_resp = await _forward(
@@ -383,17 +391,17 @@ def create_proxy_gateway_app(
         _resolve_future(
             old_route.pending_future,
             CompletedSessionInfo(
-                session_api_key=api_key,
+                session_api_key=old_route.session_api_key,
                 session_id=old_route.session_id,
                 worker_addr=old_route.worker_addr,
             ),
         )
 
     async def _start_direct_session(
-        api_key: str,
+        route_key: str,
         task_id: str,
     ) -> Response:
-        """Start an online-mode session for a static provider API key."""
+        """Start an online-mode session for a provider route key."""
         ready_entry: _ReadyWorkerEntry | None = None
         while not ready_workers.empty():
             try:
@@ -415,7 +423,8 @@ def create_proxy_gateway_app(
                 content=b"No ready training worker available for direct provider session",
             )
 
-        body = json.dumps({"task_id": task_id, "api_key": api_key}).encode()
+        session_api_key = _session_api_key_for_route(route_key)
+        body = json.dumps({"task_id": task_id, "api_key": session_api_key}).encode()
         headers = {
             "authorization": f"Bearer {admin_api_key}",
             "content-type": "application/json",
@@ -429,17 +438,19 @@ def create_proxy_gateway_app(
         if resp.status_code == 200:
             resp_data = json.loads(resp.body)
             session_id = resp_data["session_id"]
-            routes[api_key] = _SessionRoute(
+            routes[route_key] = _SessionRoute(
                 worker_addr=ready_entry.worker_addr,
                 session_id=session_id,
+                session_api_key=session_api_key,
                 pending_future=ready_entry.future,
                 last_access=time.time(),
             )
-            _schedule_eviction_cleanup(_track_key(api_key))
+            _schedule_eviction_cleanup(_track_key(route_key))
             logger.info(
-                "[direct] Session %s auto-started on worker %s",
+                "[direct] Session %s auto-started on worker %s (route=%s)",
                 session_id,
                 ready_entry.worker_addr,
+                route_key,
             )
         else:
             ready_entry.future.cancel()
@@ -451,13 +462,13 @@ def create_proxy_gateway_app(
         return resp
 
     async def _end_route(
-        api_key: str,
+        route_key: str,
         route: _SessionRoute,
         *,
         remove_route: bool = True,
     ) -> Response:
         end_headers = {
-            "authorization": f"Bearer {api_key}",
+            "authorization": f"Bearer {route.session_api_key}",
             "content-type": "application/json",
         }
         resp = await _forward(
@@ -468,12 +479,12 @@ def create_proxy_gateway_app(
         )
         if remove_route:
             async with _route_lock:
-                routes.pop(api_key, None)
+                routes.pop(route_key, None)
         if resp.status_code < 400:
             _resolve_future(
                 route.pending_future,
                 CompletedSessionInfo(
-                    session_api_key=api_key,
+                    session_api_key=route.session_api_key,
                     session_id=route.session_id,
                     worker_addr=route.worker_addr,
                 ),
@@ -506,6 +517,50 @@ def create_proxy_gateway_app(
             or str(parsed_body.get("session_id") or "")
             or "openclaw-provider"
         )
+
+    def _provider_route_key(
+        request: Request,
+        parsed_body: dict,
+        bearer_token: str | None,
+    ) -> str | None:
+        session_id = (
+            request.headers.get("x-session-id")
+            or request.headers.get("x-openclaw-session-id")
+            or request.headers.get("x-conversation-id")
+            or parsed_body.get("session_id")
+            or parsed_body.get("conversation_id")
+        )
+        if session_id:
+            return f"session:{session_id}"
+        user_id = request.headers.get("x-openclaw-user-id") or request.headers.get(
+            "x-user-id"
+        )
+        if user_id:
+            return f"user:{user_id}"
+        client_id = _client_identity(request)
+        if client_id and bearer_token:
+            token_hash = hashlib.sha256(bearer_token.encode("utf-8")).hexdigest()[:16]
+            return f"client:{client_id}:token:{token_hash}"
+        if client_id:
+            return f"client:{client_id}"
+        if bearer_token:
+            return f"token:{bearer_token}"
+        return None
+
+    def _session_api_key_for_route(route_key: str) -> str:
+        digest = hashlib.sha256(route_key.encode("utf-8")).hexdigest()[:32]
+        return f"sk-areal-{digest}"
+
+    def _client_identity(request: Request) -> str | None:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            return forwarded_for.split(",", maxsplit=1)[0].strip()
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip:
+            return real_ip.strip()
+        if request.client and request.client.host:
+            return request.client.host
+        return None
 
     async def _sweep_idle_sessions() -> None:
         if idle_timeout <= 0:
@@ -636,6 +691,7 @@ def create_proxy_gateway_app(
                     routes[api_key] = _SessionRoute(
                         worker_addr=ready_entry.worker_addr,
                         session_id=session_id,
+                        session_api_key=api_key,
                         pending_future=ready_entry.future,
                         last_access=time.time(),
                     )
@@ -708,6 +764,7 @@ def create_proxy_gateway_app(
                 routes[api_key] = _SessionRoute(
                     worker_addr=ready_entry.worker_addr,
                     session_id=session_id,
+                    session_api_key=api_key,
                     pending_future=ready_entry.future,
                     last_access=time.time(),
                 )
@@ -745,6 +802,7 @@ def create_proxy_gateway_app(
                 routes[api_key] = _SessionRoute(
                     worker_addr=worker_addr,
                     session_id=session_id,
+                    session_api_key=api_key,
                     pending_future=None,
                     last_access=time.time(),
                 )
@@ -777,40 +835,40 @@ def create_proxy_gateway_app(
         token = _extract_bearer_token(request)
         body = await request.body()
         parsed_body = _json_body(body)
+        route_key = _provider_route_key(request, parsed_body, token)
 
         await _sweep_idle_sessions()
 
-        if token is not None and token not in routes and auto_start:
+        if route_key is not None and route_key not in routes and auto_start:
             start_resp = await _start_direct_session(
-                token,
+                route_key,
                 task_id=_request_task_id(request, parsed_body),
             )
             if start_resp.status_code >= 400:
                 return start_resp
 
-        if token is None or token not in routes:
+        if route_key is None or route_key not in routes:
             return Response(status_code=401, content=b"Invalid session key")
-        route = routes[token]
+        route = routes[route_key]
         route.last_access = time.time()
-        resp = await _forward(route.worker_addr, path, body, dict(request.headers))
-        if token in routes:
+        logger.info(
+            "[forward] Route %s session %s -> worker %s",
+            route_key,
+            route.session_id,
+            route.worker_addr,
+        )
+        headers = _with_auth_header(dict(request.headers), route.session_api_key)
+        resp = await _forward(route.worker_addr, path, body, headers)
+        if route_key in routes:
             route.last_access = time.time()
         if auto_end and resp.status_code < 400 and _request_session_done(
             request, parsed_body
         ):
-            await _end_route(token, route)
+            await _end_route(route_key, route)
         return resp
 
     @app.post(f"/{CHAT_COMPLETIONS_PATHNAME}")
     async def chat_completions(request: Request):
-        token = _extract_bearer_token(request)
-        route = routes.get(token) if token else None
-        if route:
-            logger.info(
-                "[chat/completions] Session %s → worker %s",
-                route.session_id,
-                route.worker_addr,
-            )
         return await _session_forward(
             request,
             CHAT_COMPLETIONS_PATHNAME,
@@ -824,14 +882,6 @@ def create_proxy_gateway_app(
 
     @app.post(f"/{RESPONSES_PATHNAME}")
     async def responses(request: Request):
-        token = _extract_bearer_token(request)
-        route = routes.get(token) if token else None
-        if route:
-            logger.info(
-                "[responses] Session %s → worker %s",
-                route.session_id,
-                route.worker_addr,
-            )
         return await _session_forward(
             request,
             RESPONSES_PATHNAME,
@@ -845,14 +895,6 @@ def create_proxy_gateway_app(
 
     @app.post(f"/{ANTHROPIC_MESSAGES_PATHNAME}")
     async def messages(request: Request):
-        token = _extract_bearer_token(request)
-        route = routes.get(token) if token else None
-        if route:
-            logger.info(
-                "[messages] Session %s → worker %s",
-                route.session_id,
-                route.worker_addr,
-            )
         return await _session_forward(
             request,
             ANTHROPIC_MESSAGES_PATHNAME,
@@ -862,14 +904,6 @@ def create_proxy_gateway_app(
 
     @app.post(f"/{RL_SET_REWARD_PATHNAME}")
     async def set_reward(request: Request):
-        token = _extract_bearer_token(request)
-        route = routes.get(token) if token else None
-        if route:
-            logger.info(
-                "[set_reward] Session %s → worker %s",
-                route.session_id,
-                route.worker_addr,
-            )
         return await _session_forward(request, RL_SET_REWARD_PATHNAME)
 
     # -- end_session (session auth, resolve online-mode future) --------
@@ -877,10 +911,13 @@ def create_proxy_gateway_app(
     @app.post(f"/{RL_END_SESSION_PATHNAME}")
     async def end_session(request: Request):
         token = _extract_bearer_token(request)
-        if token is None or token not in routes:
+        body = await request.body()
+        parsed_body = _json_body(body)
+        route_key = _provider_route_key(request, parsed_body, token)
+        if route_key is None or route_key not in routes:
             return Response(status_code=401, content=b"Invalid session key")
 
-        return await _end_route(token, routes[token])
+        return await _end_route(route_key, routes[route_key])
 
     # -- Internal: wait_for_session (admin auth, blocks) ---------------
 
