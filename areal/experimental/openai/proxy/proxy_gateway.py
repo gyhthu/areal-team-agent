@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import os
+import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -108,6 +110,7 @@ class _SessionRoute:
     worker_addr: str
     session_id: str
     pending_future: asyncio.Future | None = None  # Future[CompletedSessionInfo]
+    last_access: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +194,14 @@ def create_proxy_gateway_app(
     known_keys: OrderedDict[str, None] = OrderedDict()  # LRU key pool
     _refreshing: set[str] = set()  # keys currently mid-refresh
     _bg_tasks: set[asyncio.Task] = set()  # prevent GC of fire-and-forget tasks
+    _route_lock = asyncio.Lock()
+    idle_timeout = float(os.environ.get("AREAL_PROVIDER_IDLE_TIMEOUT", "300"))
+    idle_check_interval = float(
+        os.environ.get(
+            "AREAL_PROVIDER_IDLE_CHECK_INTERVAL",
+            str(max(5.0, min(60.0, idle_timeout / 2))) if idle_timeout > 0 else "60",
+        )
+    )
 
     # -- Lifespan: shared aiohttp session --
 
@@ -203,7 +214,18 @@ def create_proxy_gateway_app(
         )
         async with aiohttp.ClientSession() as session:
             app.state.http_session = session
-            yield
+            idle_task = None
+            if idle_timeout > 0:
+                idle_task = asyncio.create_task(_idle_session_sweeper())
+            try:
+                yield
+            finally:
+                if idle_task is not None:
+                    idle_task.cancel()
+                    try:
+                        await idle_task
+                    except asyncio.CancelledError:
+                        pass
         logger.info("Proxy gateway shutting down")
 
     app = FastAPI(title="AReaL Proxy Gateway", lifespan=lifespan)
@@ -411,6 +433,7 @@ def create_proxy_gateway_app(
                 worker_addr=ready_entry.worker_addr,
                 session_id=session_id,
                 pending_future=ready_entry.future,
+                last_access=time.time(),
             )
             _schedule_eviction_cleanup(_track_key(api_key))
             logger.info(
@@ -427,7 +450,12 @@ def create_proxy_gateway_app(
             )
         return resp
 
-    async def _end_route(api_key: str, route: _SessionRoute) -> Response:
+    async def _end_route(
+        api_key: str,
+        route: _SessionRoute,
+        *,
+        remove_route: bool = True,
+    ) -> Response:
         end_headers = {
             "authorization": f"Bearer {api_key}",
             "content-type": "application/json",
@@ -438,7 +466,9 @@ def create_proxy_gateway_app(
             b"{}",
             end_headers,
         )
-        routes.pop(api_key, None)
+        if remove_route:
+            async with _route_lock:
+                routes.pop(api_key, None)
         if resp.status_code < 400:
             _resolve_future(
                 route.pending_future,
@@ -476,6 +506,35 @@ def create_proxy_gateway_app(
             or str(parsed_body.get("session_id") or "")
             or "openclaw-provider"
         )
+
+    async def _sweep_idle_sessions() -> None:
+        if idle_timeout <= 0:
+            return
+        now = time.time()
+        idle_routes: list[tuple[str, _SessionRoute]] = []
+        async with _route_lock:
+            for api_key, route in list(routes.items()):
+                if route.last_access and now - route.last_access >= idle_timeout:
+                    routes.pop(api_key, None)
+                    idle_routes.append((api_key, route))
+
+        for api_key, route in idle_routes:
+            logger.info(
+                "[idle] Session %s idle for %.1fs; auto-ending",
+                route.session_id,
+                now - route.last_access,
+            )
+            await _end_route(api_key, route, remove_route=False)
+
+    async def _idle_session_sweeper() -> None:
+        logger.info(
+            "[idle] Provider idle timeout enabled: %.1fs (check interval %.1fs)",
+            idle_timeout,
+            idle_check_interval,
+        )
+        while True:
+            await asyncio.sleep(idle_check_interval)
+            await _sweep_idle_sessions()
 
     # -- start_session (admin auth, refresh / reuse / new) --------------
 
@@ -578,6 +637,7 @@ def create_proxy_gateway_app(
                         worker_addr=ready_entry.worker_addr,
                         session_id=session_id,
                         pending_future=ready_entry.future,
+                        last_access=time.time(),
                     )
                     _schedule_eviction_cleanup(_track_key(api_key))
                     logger.info(
@@ -649,6 +709,7 @@ def create_proxy_gateway_app(
                     worker_addr=ready_entry.worker_addr,
                     session_id=session_id,
                     pending_future=ready_entry.future,
+                    last_access=time.time(),
                 )
                 _schedule_eviction_cleanup(_track_key(api_key))
                 logger.info(
@@ -685,6 +746,7 @@ def create_proxy_gateway_app(
                     worker_addr=worker_addr,
                     session_id=session_id,
                     pending_future=None,
+                    last_access=time.time(),
                 )
                 _schedule_eviction_cleanup(_track_key(api_key))
                 logger.info(
@@ -716,6 +778,8 @@ def create_proxy_gateway_app(
         body = await request.body()
         parsed_body = _json_body(body)
 
+        await _sweep_idle_sessions()
+
         if token is not None and token not in routes and auto_start:
             start_resp = await _start_direct_session(
                 token,
@@ -727,7 +791,10 @@ def create_proxy_gateway_app(
         if token is None or token not in routes:
             return Response(status_code=401, content=b"Invalid session key")
         route = routes[token]
+        route.last_access = time.time()
         resp = await _forward(route.worker_addr, path, body, dict(request.headers))
+        if token in routes:
+            route.last_access = time.time()
         if auto_end and resp.status_code < 400 and _request_session_done(
             request, parsed_body
         ):

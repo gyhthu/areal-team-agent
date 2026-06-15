@@ -30,10 +30,13 @@ export AREAL_PRM_JUDGE_BASE_URL="${AREAL_PRM_JUDGE_BASE_URL:-}"
 export AREAL_PRM_JUDGE_API_KEY="${AREAL_PRM_JUDGE_API_KEY:-}"
 export AREAL_PRM_JUDGE_MODEL="${AREAL_PRM_JUDGE_MODEL:-default}"
 export AREAL_PRM_JUDGE_TIMEOUT="${AREAL_PRM_JUDGE_TIMEOUT:-30}"
+export AREAL_PROVIDER_IDLE_TIMEOUT="${AREAL_PROVIDER_IDLE_TIMEOUT:-300}"
+export AREAL_PROVIDER_IDLE_CHECK_INTERVAL="${AREAL_PROVIDER_IDLE_CHECK_INTERVAL:-30}"
 
 echo "OpenClaw provider API key: ${PROVIDER_API_KEY}"
 echo "Use the gateway URL printed by AReaL as the provider baseUrl."
 echo "For OpenAI-compatible clients, use baseUrl=http://<gateway>/v1 and model=default."
+echo "Idle sessions auto-end after ${AREAL_PROVIDER_IDLE_TIMEOUT}s."
 
 python3 examples/openclaw/train.py \
   --config examples/openclaw/config_qwen25_1_5b_npu.yaml \
