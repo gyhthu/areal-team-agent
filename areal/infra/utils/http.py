@@ -1,4 +1,5 @@
 import asyncio
+import os
 from http import HTTPStatus
 from typing import Any
 
@@ -8,6 +9,8 @@ from areal.utils import logging
 
 DEFAULT_RETRIES = 1
 DEFAULT_REQUEST_TIMEOUT = 3600
+DEFAULT_ADMIN_API_KEY = "areal-admin-key"
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 logger = logging.getLogger("HTTPUtils")
@@ -15,6 +18,31 @@ logger = logging.getLogger("HTTPUtils")
 
 def get_default_connector():
     return aiohttp.TCPConnector(limit=0, use_dns_cache=False, force_close=True)
+
+
+def validate_admin_api_key(
+    host: str,
+    admin_api_key: str,
+    default_key: str = DEFAULT_ADMIN_API_KEY,
+    config_field: str = "admin_api_key",
+) -> None:
+    """Refuse to expose services on a routable host with the default admin key."""
+    if admin_api_key != default_key:
+        return
+
+    allow_override = os.environ.get("AREAL_ALLOW_DEFAULT_ADMIN_KEY", "0") == "1"
+    if host in _LOOPBACK_HOSTS or allow_override:
+        logger.warning(
+            "Using default admin API key. Change '%s' before exposing this server.",
+            config_field,
+        )
+        return
+
+    raise RuntimeError(
+        f"Refusing to start server on host {host!r} with the default admin API "
+        f"key ({default_key!r}). Set '{config_field}' to a unique secret, or "
+        "set AREAL_ALLOW_DEFAULT_ADMIN_KEY=1 to acknowledge the risk."
+    )
 
 
 async def arequest_with_retry(
