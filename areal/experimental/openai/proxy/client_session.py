@@ -34,6 +34,12 @@ if TYPE_CHECKING:
 logger = getLogger("OpenAIProxyClient")
 
 
+def _model_to_dict(model: BaseModel) -> dict:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
 class OpenAIProxyClient:
     """Client session for interacting with the OpenAI proxy server.
 
@@ -231,7 +237,7 @@ async def post_json(
     if payload is None:
         payload = {}
     elif isinstance(payload, BaseModel):
-        payload = payload.model_dump()
+        payload = _model_to_dict(payload)
 
     async with session.post(
         url, json=payload, timeout=timeout, headers=headers

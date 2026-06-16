@@ -84,6 +84,19 @@ _RULE_FAILURE_PATTERNS = (
 )
 
 
+def _model_to_dict(model: BaseModel, **kwargs) -> dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump(**kwargs)
+    return model.dict(**kwargs)
+
+
+def _model_field_default(model: BaseModel, key: str) -> Any:
+    fields = getattr(type(model), "model_fields", None)
+    if fields is not None:
+        return fields[key].default
+    return type(model).__fields__[key].default
+
+
 # =============================================================================
 # Warning Deduplication
 # =============================================================================
@@ -739,7 +752,7 @@ async def _call_client_create(
         if k not in areal_client_ignored_args and k not in areal_client_disallowed_args
     )
 
-    kwargs = request.model_dump() if isinstance(request, BaseModel) else dict(request)
+    kwargs = _model_to_dict(request) if isinstance(request, BaseModel) else dict(request)
     dropped_args = []
     for k, v in kwargs.items():
         if k not in areal_client_allowed_args:
@@ -750,7 +763,7 @@ async def _call_client_create(
 
     def _is_default_value(k: str, v: Any) -> bool:
         if isinstance(request, BaseModel):
-            return v == type(request).model_fields[k].default
+            return v == _model_field_default(request, k)
         return False
 
     dropped_non_default_args = [

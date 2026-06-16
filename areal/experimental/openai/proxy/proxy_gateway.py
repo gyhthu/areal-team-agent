@@ -46,6 +46,12 @@ _CLIENT_TIMEOUT = aiohttp.ClientTimeout(total=120)
 _DEFAULT_WAIT_TIMEOUT = 3600.0
 
 
+def _model_to_dict(model):
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -980,10 +986,12 @@ def create_proxy_gateway_app(
             result.session_id,
             result.worker_addr,
         )
-        return WaitForSessionResponse(
-            session_api_key=result.session_api_key,
-            session_id=result.session_id,
-            worker_addr=result.worker_addr,
-        ).model_dump()
+        return _model_to_dict(
+            WaitForSessionResponse(
+                session_api_key=result.session_api_key,
+                session_id=result.session_id,
+                worker_addr=result.worker_addr,
+            )
+        )
 
     return app
