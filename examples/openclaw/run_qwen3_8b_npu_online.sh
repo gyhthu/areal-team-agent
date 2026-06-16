@@ -24,11 +24,13 @@ EXPERIMENT_NAME="${EXPERIMENT_NAME:-openclaw-online-qwen3-8b-npu}"
 TRIAL_NAME="${TRIAL_NAME:-qwen3-8b}"
 TOTAL_TRAIN_STEPS="${TOTAL_TRAIN_STEPS:-100}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2}"
-MAX_CONCURRENT_ROLLOUTS="${MAX_CONCURRENT_ROLLOUTS:-32}"
-MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-2048}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-MAX_TOKENS_PER_MB="${MAX_TOKENS_PER_MB:-8192}"
-VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.75}"
+MAX_CONCURRENT_ROLLOUTS="${MAX_CONCURRENT_ROLLOUTS:-8}"
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-1024}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
+MAX_TOKENS_PER_MB="${MAX_TOKENS_PER_MB:-4096}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.6}"
+VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-4}"
+ALLOCATION_MODE="${ALLOCATION_MODE:-vllm:d1p1t4+d4p1t1}"
 
 export AREAL_PRM_JUDGE_BASE_URL="${AREAL_PRM_JUDGE_BASE_URL:-}"
 export AREAL_PRM_JUDGE_API_KEY="${AREAL_PRM_JUDGE_API_KEY:-}"
@@ -43,7 +45,7 @@ echo "Use the gateway URL printed by AReaL as the provider baseUrl."
 echo "For OpenAI-compatible clients, use baseUrl=http://<gateway>/v1 and model=default."
 echo "If the client requires an apiKey, any placeholder is fine, e.g. ${PROVIDER_API_KEY}."
 echo "If no judge URL is configured, rule reward mode is ${AREAL_PRM_RULE_REWARD_MODE}."
-echo "Conservative defaults: batch=${TRAIN_BATCH_SIZE}, concurrent_rollouts=${MAX_CONCURRENT_ROLLOUTS}, max_new_tokens=${MAX_NEW_TOKENS}."
+echo "Conservative defaults: allocation=${ALLOCATION_MODE}, batch=${TRAIN_BATCH_SIZE}, concurrent_rollouts=${MAX_CONCURRENT_ROLLOUTS}, max_new_tokens=${MAX_NEW_TOKENS}, max_model_len=${MAX_MODEL_LEN}."
 echo "Idle sessions auto-end after ${AREAL_PROVIDER_IDLE_TIMEOUT}s."
 
 python3 examples/openclaw/train.py \
@@ -51,6 +53,7 @@ python3 examples/openclaw/train.py \
   scheduler.type=local \
   experiment_name="${EXPERIMENT_NAME}" \
   trial_name="${TRIAL_NAME}" \
+  allocation_mode="${ALLOCATION_MODE}" \
   total_train_steps="${TOTAL_TRAIN_STEPS}" \
   actor.path="${MODEL_PATH}" \
   ref.path="${MODEL_PATH}" \
@@ -67,6 +70,7 @@ python3 examples/openclaw/train.py \
   sglang.context_length="${MAX_MODEL_LEN}" \
   vllm.max_model_len="${MAX_MODEL_LEN}" \
   vllm.gpu_memory_utilization="${VLLM_GPU_MEMORY_UTILIZATION}" \
+  vllm.tensor_parallel_size="${VLLM_TENSOR_PARALLEL_SIZE}" \
   +actor.scheduling_spec.0.env_vars.AREAL_PRM_JUDGE_BASE_URL="${AREAL_PRM_JUDGE_BASE_URL}" \
   +actor.scheduling_spec.0.env_vars.AREAL_PRM_JUDGE_API_KEY="${AREAL_PRM_JUDGE_API_KEY}" \
   +actor.scheduling_spec.0.env_vars.AREAL_PRM_JUDGE_MODEL="${AREAL_PRM_JUDGE_MODEL}" \
