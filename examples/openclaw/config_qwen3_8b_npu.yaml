@@ -36,6 +36,7 @@ rollout:
     mode: online
     tool_call_parser: qwen3
     reasoning_parser: qwen3
+    engine_max_tokens: ${vllm.max_model_len}
     export_style: individual
     turn_discount: 1.0
     admin_api_key: sk-openclaw-npu-dev

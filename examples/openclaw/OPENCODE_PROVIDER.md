@@ -132,6 +132,11 @@ AREAL_PRM_RULE_REWARD_MODE=basic
 So if the user stops interacting, the session is finalized after about five
 minutes and receives a basic rule-based reward unless an LLM judge is configured.
 
+For Qwen3-8B, the launch script also sets `rollout.openai.engine_max_tokens` to
+the same value as `vllm.max_model_len`. This protects the gateway when clients
+request a very large output budget, such as `max_tokens=32000`, while the served
+model context is smaller, such as `16384`.
+
 ## 5. Quick Smoke Test
 
 Before opening OpenCode, you can test the gateway directly:
@@ -174,4 +179,3 @@ export AREAL_PROVIDER_IDLE_TIMEOUT=300
 export AREAL_PROVIDER_IDLE_CHECK_INTERVAL=30
 bash examples/openclaw/run_qwen3_8b_npu_online.sh
 ```
-

@@ -69,6 +69,7 @@ python3 examples/openclaw/train.py \
   ref.mb_spec.max_tokens_per_mb="${MAX_TOKENS_PER_MB}" \
   sglang.context_length="${MAX_MODEL_LEN}" \
   vllm.max_model_len="${MAX_MODEL_LEN}" \
+  rollout.openai.engine_max_tokens="${MAX_MODEL_LEN}" \
   vllm.gpu_memory_utilization="${VLLM_GPU_MEMORY_UTILIZATION}" \
   vllm.tensor_parallel_size="${VLLM_TENSOR_PARALLEL_SIZE}" \
   +actor.scheduling_spec.0.env_vars.AREAL_PRM_JUDGE_BASE_URL="${AREAL_PRM_JUDGE_BASE_URL}" \
