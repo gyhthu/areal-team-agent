@@ -182,6 +182,10 @@ export AREAL_PROVIDER_IDLE_CHECK_INTERVAL=30
 bash examples/openclaw/run_qwen3_8b_npu_online.sh
 ```
 
+For the default Qwen3-8B allocation (`vllm:d1p1t4+d4p1t1`), keep
+`TRAIN_BATCH_SIZE>=4`. The training side uses 4-way data parallelism, so each
+PPO batch must contain at least 4 completed trajectories.
+
 If the log shows `Unsupported tool_call_parser: qwen3`, use the Qwen3-8B tool
 parser from the official Qwen SGLang deployment guide:
 

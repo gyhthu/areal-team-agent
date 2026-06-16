@@ -137,7 +137,7 @@ vllm:
   enforce_eager: true
 
 train_dataset:
-  batch_size: 2
+  batch_size: 4
   path: "null"
   type: rl
 
