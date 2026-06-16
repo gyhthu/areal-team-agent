@@ -95,8 +95,8 @@ class StatsLogger:
 
         # trackio init
         self._trackio_enabled = False
-        trackio_config = self.config.trackio
-        if trackio_config.mode != "disabled":
+        trackio_config = getattr(self.config, "trackio", None)
+        if trackio_config is not None and trackio_config.mode != "disabled":
             try:
                 import trackio
             except ImportError as exc:
