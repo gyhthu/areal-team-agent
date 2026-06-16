@@ -135,7 +135,9 @@ minutes and receives a basic rule-based reward unless an LLM judge is configured
 For Qwen3-8B, the launch script also sets `rollout.openai.engine_max_tokens` to
 the same value as `vllm.max_model_len`. This protects the gateway when clients
 request a very large output budget, such as `max_tokens=32000`, while the served
-model context is smaller, such as `16384`.
+model context has a finite limit. The default Qwen3-8B NPU script uses a 32k
+context window (`MAX_MODEL_LEN=32768`) and lowers rollout concurrency to keep
+the first production run practical on 8 Ascend cards.
 
 ## 5. Quick Smoke Test
 
