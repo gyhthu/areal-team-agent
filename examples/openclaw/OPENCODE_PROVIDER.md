@@ -182,12 +182,12 @@ export AREAL_PROVIDER_IDLE_CHECK_INTERVAL=30
 bash examples/openclaw/run_qwen3_8b_npu_online.sh
 ```
 
-If the log shows `Unsupported tool_call_parser: qwen3`, use the default Qwen3-8B
-script or set:
+If the log shows `Unsupported tool_call_parser: qwen3`, use the Qwen3-8B tool
+parser from the official Qwen SGLang deployment guide:
 
 ```bash
-export TOOL_CALL_PARSER=qwen
+export TOOL_CALL_PARSER=qwen25
 ```
 
 `reasoning_parser=qwen3` is still used for Qwen3 thinking tags; only the tool
-call parser should stay on the supported `qwen` parser in this Ascend runtime.
+call parser uses the Qwen2.5-compatible `qwen25` parser name in this runtime.
