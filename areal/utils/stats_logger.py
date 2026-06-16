@@ -7,7 +7,6 @@ from dataclasses import asdict
 
 import swanlab
 import torch.distributed as dist
-import trackio
 import wandb
 from tensorboardX import SummaryWriter
 
@@ -98,6 +97,13 @@ class StatsLogger:
         self._trackio_enabled = False
         trackio_config = self.config.trackio
         if trackio_config.mode != "disabled":
+            try:
+                import trackio
+            except ImportError as exc:
+                raise ImportError(
+                    "trackio is required when stats_logger.trackio.mode is not "
+                    "'disabled'. Install trackio or set trackio.mode=disabled."
+                ) from exc
             trackio.init(
                 project=trackio_config.project or self.config.experiment_name,
                 name=trackio_config.name or self.config.trial_name,
@@ -128,6 +134,8 @@ class StatsLogger:
         wandb.finish()
         swanlab.finish()
         if getattr(self, "_trackio_enabled", False):
+            import trackio
+
             trackio.finish()
         if self.summary_writer is not None:
             self.summary_writer.close()
@@ -152,6 +160,8 @@ class StatsLogger:
             wandb.log(item, step=log_step + i)
             swanlab.log(item, step=log_step + i)
             if getattr(self, "_trackio_enabled", False):
+                import trackio
+
                 trackio.log(item, step=log_step + i)
             if self.summary_writer is not None:
                 for key, val in item.items():
