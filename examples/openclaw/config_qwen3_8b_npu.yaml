@@ -34,7 +34,7 @@ rollout:
   dump_to_file: true
   openai:
     mode: online
-    tool_call_parser: qwen3
+    tool_call_parser: qwen
     reasoning_parser: qwen3
     engine_max_tokens: ${vllm.max_model_len}
     export_style: individual

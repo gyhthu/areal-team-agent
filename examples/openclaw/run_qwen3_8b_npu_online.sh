@@ -31,6 +31,7 @@ MAX_TOKENS_PER_MB="${MAX_TOKENS_PER_MB:-4096}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.7}"
 VLLM_TENSOR_PARALLEL_SIZE="${VLLM_TENSOR_PARALLEL_SIZE:-4}"
 ALLOCATION_MODE="${ALLOCATION_MODE:-vllm:d1p1t4+d4p1t1}"
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen}"
 
 export AREAL_PRM_JUDGE_BASE_URL="${AREAL_PRM_JUDGE_BASE_URL:-}"
 export AREAL_PRM_JUDGE_API_KEY="${AREAL_PRM_JUDGE_API_KEY:-}"
@@ -70,6 +71,7 @@ python3 examples/openclaw/train.py \
   sglang.context_length="${MAX_MODEL_LEN}" \
   vllm.max_model_len="${MAX_MODEL_LEN}" \
   rollout.openai.engine_max_tokens="${MAX_MODEL_LEN}" \
+  rollout.openai.tool_call_parser="${TOOL_CALL_PARSER}" \
   vllm.gpu_memory_utilization="${VLLM_GPU_MEMORY_UTILIZATION}" \
   vllm.tensor_parallel_size="${VLLM_TENSOR_PARALLEL_SIZE}" \
   +actor.scheduling_spec.0.env_vars.AREAL_PRM_JUDGE_BASE_URL="${AREAL_PRM_JUDGE_BASE_URL}" \
