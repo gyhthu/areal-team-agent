@@ -74,6 +74,10 @@ os.environ["OPENAI_BASE_URL"] = os.environ.get("OPENAI_BASE_URL", "none")
 logger = logging.getLogger("OpenAIClient")
 
 
+def _debug_enabled() -> bool:
+    return os.getenv("AREAL_OPENAI_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+
+
 def _ensure_message_dict_list(
     name: str,
     value: list[Any],
@@ -524,6 +528,13 @@ class AsyncCompletionsWithReward(BaseAsyncCompletions):
 
         # Parse tool calls.
         tool_calls = None
+        if _debug_enabled():
+            has_xml_tool_call = "<tool_call>" in output_text
+            logger.info(
+                f"chat.completions generated output; has_tools={bool(tools_list)} "
+                f"tool_count={len(tools_list or [])} tool_choice={tool_choice!r} "
+                f"has_xml_tool_call={has_xml_tool_call} stop_reason={response.stop_reason}"
+            )
         try:
             if (is_omitted(tool_choice) or tool_choice != "none") and tools_list:
                 tool_calls, output_text, response.stop_reason = process_tool_calls(
@@ -533,6 +544,13 @@ class AsyncCompletionsWithReward(BaseAsyncCompletions):
                     self.reasoning_parser,
                     response.stop_reason,
                 )
+                if _debug_enabled():
+                    logger.info(
+                        f"chat.completions parser result; "
+                        f"tool_calls={len(tool_calls or [])} "
+                        f"remaining_has_xml={'<tool_call>' in output_text} "
+                        f"stop_reason={response.stop_reason}"
+                    )
         except json.JSONDecodeError as e:
             logger.warning(
                 f"Failed to parse tool calls from output text: {e}, output_text:\n"
@@ -925,6 +943,13 @@ class AsyncResponsesWithReward(BaseAsyncResponses):
 
         # Parse tool calls.
         tool_calls = None
+        if _debug_enabled():
+            has_xml_tool_call = "<tool_call>" in output_text
+            logger.info(
+                f"responses generated output; has_tools={bool(tools_list)} "
+                f"tool_count={len(tools_list or [])} tool_choice={tool_choice!r} "
+                f"has_xml_tool_call={has_xml_tool_call} stop_reason={engine_resp.stop_reason}"
+            )
         try:
             if (is_omitted(tool_choice) or tool_choice != "none") and tools_list:
                 tool_calls, output_text, engine_resp.stop_reason = process_tool_calls(
@@ -935,6 +960,12 @@ class AsyncResponsesWithReward(BaseAsyncResponses):
                     engine_resp.stop_reason,
                     use_responses=True,
                 )
+                if _debug_enabled():
+                    logger.info(
+                        f"responses parser result; tool_calls={len(tool_calls or [])} "
+                        f"remaining_has_xml={'<tool_call>' in output_text} "
+                        f"stop_reason={engine_resp.stop_reason}"
+                    )
         except json.JSONDecodeError as e:
             logger.warning(
                 f"Failed to parse tool calls from output text: {e}, output_text:\n"

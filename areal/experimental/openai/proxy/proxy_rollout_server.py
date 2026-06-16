@@ -794,6 +794,17 @@ async def _call_client_create(
     if stream:
         kwargs["stream"] = True
 
+    if os.getenv("AREAL_OPENAI_DEBUG", "").lower() in {"1", "true", "yes", "on"}:
+        tools = kwargs.get("tools")
+        messages = kwargs.get("messages") or kwargs.get("input")
+        logger.info(
+            f"OpenAI proxy request; session={session_id} stream={stream} "
+            f"has_tools={bool(tools)} tool_count={len(tools or [])} "
+            f"tool_choice={kwargs.get('tool_choice')!r} "
+            f"message_count={len(messages) if isinstance(messages, list) else 'n/a'} "
+            f"keys={sorted(kwargs.keys())}"
+        )
+
     try:
         previous_ids = set(session_data.completions.keys())
         session_data.attach_next_state_from_request(kwargs)

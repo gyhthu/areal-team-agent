@@ -40,6 +40,7 @@ export AREAL_PRM_JUDGE_TIMEOUT="${AREAL_PRM_JUDGE_TIMEOUT:-30}"
 export AREAL_PRM_RULE_REWARD_MODE="${AREAL_PRM_RULE_REWARD_MODE:-basic}"
 export AREAL_PROVIDER_IDLE_TIMEOUT="${AREAL_PROVIDER_IDLE_TIMEOUT:-300}"
 export AREAL_PROVIDER_IDLE_CHECK_INTERVAL="${AREAL_PROVIDER_IDLE_CHECK_INTERVAL:-30}"
+export AREAL_OPENAI_DEBUG="${AREAL_OPENAI_DEBUG:-0}"
 
 echo "Starting OpenClaw online RL with ${MODEL_PATH} on 8 Ascend cards."
 echo "Use the gateway URL printed by AReaL as the provider baseUrl."
@@ -48,6 +49,7 @@ echo "If the client requires an apiKey, any placeholder is fine, e.g. ${PROVIDER
 echo "If no judge URL is configured, rule reward mode is ${AREAL_PRM_RULE_REWARD_MODE}."
 echo "Conservative defaults: allocation=${ALLOCATION_MODE}, batch=${TRAIN_BATCH_SIZE}, concurrent_rollouts=${MAX_CONCURRENT_ROLLOUTS}, max_new_tokens=${MAX_NEW_TOKENS}, max_model_len=${MAX_MODEL_LEN}."
 echo "Idle sessions auto-end after ${AREAL_PROVIDER_IDLE_TIMEOUT}s."
+echo "OpenAI proxy debug logging is ${AREAL_OPENAI_DEBUG}."
 
 python3 examples/openclaw/train.py \
   --config examples/openclaw/config_qwen3_8b_npu.yaml \
@@ -81,4 +83,5 @@ python3 examples/openclaw/train.py \
   +actor.scheduling_spec.0.env_vars.AREAL_PRM_RULE_REWARD_MODE="${AREAL_PRM_RULE_REWARD_MODE}" \
   +actor.scheduling_spec.0.env_vars.AREAL_PROVIDER_IDLE_TIMEOUT="${AREAL_PROVIDER_IDLE_TIMEOUT}" \
   +actor.scheduling_spec.0.env_vars.AREAL_PROVIDER_IDLE_CHECK_INTERVAL="${AREAL_PROVIDER_IDLE_CHECK_INTERVAL}" \
+  +actor.scheduling_spec.0.env_vars.AREAL_OPENAI_DEBUG="${AREAL_OPENAI_DEBUG}" \
   rollout.openai.admin_api_key="${ADMIN_API_KEY}"

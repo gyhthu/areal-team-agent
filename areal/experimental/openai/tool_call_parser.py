@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import traceback
 import uuid
@@ -17,6 +18,10 @@ from areal.utils import logging
 logger = logging.getLogger("ToolCallParser")
 
 _QWEN_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+
+
+def _debug_enabled() -> bool:
+    return os.getenv("AREAL_OPENAI_DEBUG", "").lower() in {"1", "true", "yes", "on"}
 
 
 def _tool_names(tools: list[Any], use_responses: bool) -> set[str]:
@@ -52,6 +57,11 @@ def _parse_qwen_xml_tool_calls(
         return None, content_text
 
     valid_tool_names = _tool_names(tools, use_responses)
+    if _debug_enabled():
+        logger.info(
+            f"Qwen XML fallback saw {len(matches)} tool_call block(s); "
+            f"valid_tools={sorted(valid_tool_names)} use_responses={use_responses}"
+        )
     tool_calls: list[ChatCompletionMessageFunctionToolCall | ResponseFunctionToolCall] = []
 
     for match in matches:
@@ -70,6 +80,11 @@ def _parse_qwen_xml_tool_calls(
             name = item.get("name") or fn.get("name")
             arguments = item.get("arguments", item.get("parameters", fn.get("arguments")))
             if not name or (valid_tool_names and name not in valid_tool_names):
+                if _debug_enabled():
+                    logger.warning(
+                        f"Qwen XML fallback rejected tool call name={name!r}; "
+                        f"valid_tools={sorted(valid_tool_names)}"
+                    )
                 return None, content_text
             arguments_str = _dump_arguments(arguments)
             if use_responses:
@@ -93,6 +108,8 @@ def _parse_qwen_xml_tool_calls(
                 )
 
     content_without_calls = _QWEN_TOOL_CALL_RE.sub("", content_text).strip()
+    if _debug_enabled():
+        logger.info(f"Qwen XML fallback parsed {len(tool_calls)} tool call(s)")
     return tool_calls or None, content_without_calls
 
 
@@ -200,6 +217,11 @@ def process_tool_calls(
                     for call_info in call_info_list
                 ]
 
+            if _debug_enabled():
+                logger.info(
+                    f"SGLang parser parsed {len(tool_calls)} tool call(s); "
+                    f"use_responses={use_responses}"
+                )
             return tool_calls, reasoning_text + content_text, finish_reason
         except Exception as e:
             logger.error(f"Tool call parsing error: {e}")
