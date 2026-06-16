@@ -1,16 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import hmac
 import inspect
+import json
 import os
+import re
 import secrets
 import threading
 import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
 import uvicorn
 from anthropic.types.message import Message
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -20,16 +25,16 @@ from litellm.llms.anthropic.experimental_pass_through.adapters.transformation im
     AnthropicAdapter,
 )
 from litellm.types.utils import ModelResponse as LitellmModelResponse
-from pydantic import BaseModel
-
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.chat.completion_create_params import CompletionCreateParams
 from openai.types.responses import Response
 from openai.types.responses.response_create_params import ResponseCreateParams
+from pydantic import BaseModel
 
-from areal.api.cli_args import NameResolveConfig, OpenAIProxyConfig
+from areal.api.cli_args import NameResolveConfig
 from areal.experimental.openai.client import ArealOpenAI
 from areal.infra.rpc.serialization import deserialize_value, serialize_value
+from areal.infra.utils.http import validate_admin_api_key
 from areal.utils import name_resolve, names, seeding
 from areal.utils.dynamic_import import import_from_string
 from areal.utils.hf_utils import load_hf_tokenizer
@@ -60,6 +65,23 @@ if TYPE_CHECKING:
 
 
 logger = getLogger("ProxyRolloutServer")
+
+_JUDGE_SYSTEM_PROMPT = """You are a strict but fair reward judge for an AI agent.
+Given a full interaction trajectory, decide whether the assistant successfully helped
+the user complete the task. Return only one JSON object: {"score": 1}, {"score": 0},
+or {"score": -1}. Use 1 for success, 0 for unclear/partial, and -1 for failure."""
+
+_RULE_FAILURE_PATTERNS = (
+    "traceback",
+    "exception",
+    "error:",
+    "failed",
+    "cannot",
+    "can't",
+    "unable to",
+    "i don't know",
+    "i do not know",
+)
 
 
 # =============================================================================
@@ -205,6 +227,161 @@ def _remove_api_keys_for_session(session_id: str) -> None:
         _api_key_to_session.pop(api_key, None)
 
 
+def _judge_chat_url() -> str:
+    base_url = (
+        os.environ.get("AREAL_PRM_JUDGE_BASE_URL")
+        or os.environ.get("OPENCLAW_PRM_JUDGE_BASE_URL")
+        or ""
+    ).strip()
+    if not base_url:
+        return ""
+    base_url = base_url.rstrip("/")
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    return f"{base_url}/chat/completions"
+
+
+def _format_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=False)
+
+
+def _format_messages(messages: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for message in messages:
+        role = message.get("role", "unknown")
+        content = _format_content(message.get("content", ""))
+        lines.append(f"{role}: {content}")
+    return lines
+
+
+def _session_transcript(session_data: SessionData) -> str:
+    lines: list[str] = []
+    for i, interaction in enumerate(session_data.completions.values(), start=1):
+        lines.append(f"## Interaction {i}")
+        lines.extend(_format_messages(interaction.messages))
+        if interaction.output_message_list:
+            lines.extend(_format_messages(interaction.output_message_list))
+        if interaction.next_state is not None:
+            lines.append("next_state: " + _format_content(interaction.next_state))
+    return "\n".join(lines)
+
+
+def _parse_judge_score(text: str) -> float:
+    try:
+        data = json.loads(text)
+        score = data.get("score")
+        if score in {-1, 0, 1}:
+            return float(score)
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"(?<!\d)-?1|(?<!\d)0(?!\d)", text)
+    if match:
+        return float(match.group(0))
+    return 0.0
+
+
+def _rule_reward_enabled() -> bool:
+    mode = os.environ.get("AREAL_PRM_RULE_REWARD_MODE", "basic").strip().lower()
+    return mode not in {"0", "false", "off", "disabled", "none"}
+
+
+def _has_assistant_output(session_data: SessionData) -> bool:
+    for interaction in session_data.completions.values():
+        for message in interaction.output_message_list or []:
+            content = _format_content(message.get("content", ""))
+            if content.strip():
+                return True
+    return False
+
+
+def _rule_based_reward(session_data: SessionData) -> float:
+    transcript = _session_transcript(session_data).lower()
+    if not transcript.strip() or not _has_assistant_output(session_data):
+        return -1.0
+    if any(pattern in transcript for pattern in _RULE_FAILURE_PATTERNS):
+        return -1.0
+    return 1.0
+
+
+def _maybe_score_session_with_rules(session_data: SessionData, reason: str) -> None:
+    if not _rule_reward_enabled():
+        logger.info(
+            "Rule reward disabled for session %s; leaving rewards unchanged",
+            session_data.session_id,
+        )
+        return
+    reward = _rule_based_reward(session_data)
+    session_data.completions.set_last_reward(reward)
+    logger.info(
+        "Rule reward assigned trajectory reward %.1f to session %s (%s)",
+        reward,
+        session_data.session_id,
+        reason,
+    )
+
+
+async def _maybe_score_session_with_judge(session_data: SessionData) -> None:
+    """Assign a trajectory-level reward with an OpenAI-compatible judge if needed."""
+    if len(session_data.completions) == 0:
+        return
+    if any(interaction.reward is not None for interaction in session_data.completions.values()):
+        return
+
+    chat_url = _judge_chat_url()
+    if not chat_url:
+        _maybe_score_session_with_rules(session_data, "judge URL not configured")
+        return
+
+    transcript = _session_transcript(session_data)
+    if not transcript.strip():
+        _maybe_score_session_with_rules(session_data, "empty transcript")
+        return
+
+    model = os.environ.get("AREAL_PRM_JUDGE_MODEL", "default")
+    api_key = (
+        os.environ.get("AREAL_PRM_JUDGE_API_KEY")
+        or os.environ.get("OPENCLAW_PRM_JUDGE_API_KEY")
+        or ""
+    )
+    timeout = float(os.environ.get("AREAL_PRM_JUDGE_TIMEOUT", "30"))
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": transcript},
+        ],
+        "temperature": 0,
+        "max_tokens": 64,
+    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.post(chat_url, headers=headers, json=payload) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        content = data["choices"][0]["message"]["content"]
+        reward = _parse_judge_score(content)
+        session_data.completions.set_last_reward(reward)
+        logger.info(
+            "Judge assigned trajectory reward %.1f to session %s",
+            reward,
+            session_data.session_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Judge scoring failed for session %s; falling back to rule reward: %s",
+            session_data.session_id,
+            exc,
+        )
+        _maybe_score_session_with_rules(session_data, "judge failed")
+
+
 # =============================================================================
 # FastAPI Application
 # =============================================================================
@@ -262,25 +439,33 @@ def _setup_openai_client():
     global _openai_client, _session_timeout_seconds, _admin_api_key
     config = _engine.config
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
-    openai_cfg = config.openai or OpenAIProxyConfig()
+    agent_cfg = config.agent
     _openai_client = ArealOpenAI(
         engine=_engine,
         tokenizer=tokenizer,
-        tool_call_parser=openai_cfg.tool_call_parser,
-        reasoning_parser=openai_cfg.reasoning_parser,
-        engine_max_tokens=openai_cfg.engine_max_tokens,
-        chat_template_type=openai_cfg.chat_template_type,
+        tool_call_parser=agent_cfg.tool_call_parser,
+        reasoning_parser=agent_cfg.reasoning_parser,
+        engine_max_tokens=agent_cfg.engine_max_tokens,
+        chat_template_type=agent_cfg.chat_template_type,
+        lora_name=config.lora_name,
     )
     # Set session timeout from config
-    _session_timeout_seconds = openai_cfg.session_timeout_seconds
-    # Set admin API key from config
+    _session_timeout_seconds = agent_cfg.session_timeout_seconds
+    # Validate admin API key BEFORE assigning it to the global, so a
+    # failed validation cannot leave the default key live on the server.
+    # The default admin key is publicly known; refuse to use it when the
+    # server is reachable from outside the local host (otherwise anyone
+    # who can reach this port can call admin endpoints such as
+    # grant_capacity, start_session, export_trajectories, ...).
+    validate_admin_api_key(
+        _server_host,
+        agent_cfg.admin_api_key,
+        default_key=DEFAULT_ADMIN_API_KEY,
+        config_field="AgentConfig.admin_api_key",
+    )
+    # Only commit the key to the global after validation has passed.
     with _lock:
-        _admin_api_key = openai_cfg.admin_api_key
-        if _admin_api_key == DEFAULT_ADMIN_API_KEY:
-            logger.warning(
-                "Using default admin API key. Change 'admin_api_key' in "
-                "OpenAIProxyConfig for non-local deployments."
-            )
+        _admin_api_key = agent_cfg.admin_api_key
 
 
 @app.post("/configure")
@@ -587,12 +772,20 @@ async def _call_client_create(
         kwargs["top_p"] = 1.0
         _warn_once("top_p not set in request, defaulting to 1.0")
 
-    # Add stream parameter if requested
+    # Strip stream from request body to prevent it from bypassing the explicit
+    # `stream` parameter.  Without this, a request with {"stream": true} would
+    # leak through kwargs and cause the client to return an AsyncGenerator even
+    # when the caller did not ask for streaming.
+    kwargs.pop("stream", None)
     if stream:
         kwargs["stream"] = True
 
     try:
-        return await create_fn(areal_cache=session_data.completions, **kwargs)
+        previous_ids = set(session_data.completions.keys())
+        session_data.attach_next_state_from_request(kwargs)
+        result = await create_fn(areal_cache=session_data.completions, **kwargs)
+        session_data.track_latest_interaction(previous_ids)
+        return result
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
@@ -602,16 +795,61 @@ async def _call_client_create(
 @app.post(
     f"/{CHAT_COMPLETIONS_PATHNAME}",
     dependencies=[Depends(validate_json_request)],
+    response_model=None,
 )
 async def chat_completions(
     request: CompletionCreateParams, session_id: str = Depends(_require_session_key)
-) -> ChatCompletion:
-    """OpenAI-compatible chat completions endpoint."""
+) -> ChatCompletion | StreamingResponse:
+    """OpenAI-compatible chat completions endpoint.
+
+    Supports both streaming (stream=True) and non-streaming requests.
+    For streaming requests, returns a StreamingResponse with Server-Sent Events
+    in the OpenAI streaming format (data: {json}\\n\\n ... data: [DONE]\\n\\n).
+    """
     if _openai_client is None:
         raise HTTPException(
             status_code=500,
             detail='Proxy server not initialized. Send requests to /create_engine then /call "initialize" first.',
         )
+
+    # CompletionCreateParams is a TypedDict (dict subclass), so use dict access.
+    is_streaming = request.get("stream") is True
+
+    if is_streaming:
+        openai_stream = None
+        try:
+            openai_stream = await _call_client_create(
+                create_fn=_openai_client.chat.completions.create,
+                request=request,
+                session_id=session_id,
+                stream=True,
+            )
+
+            # Convert ChatCompletionChunk objects to OpenAI SSE format
+            async def _openai_sse_generator(
+                chunk_stream: AsyncGenerator[ChatCompletionChunk, None],
+            ) -> AsyncGenerator[str, None]:
+                async for chunk in chunk_stream:
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+                yield "data: [DONE]\n\n"
+
+            safe_stream = _safe_stream_wrapper(_openai_sse_generator(openai_stream))
+
+            return StreamingResponse(
+                safe_stream,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        except Exception as e:
+            if openai_stream is not None and hasattr(openai_stream, "aclose"):
+                await openai_stream.aclose()
+            logger.error(f"Error setting up streaming response: {e}")
+            raise HTTPException(status_code=500, detail=f"Streaming setup failed: {e}")
+
     return await _call_client_create(
         create_fn=_openai_client.chat.completions.create,
         request=request,
@@ -842,6 +1080,8 @@ async def export_trajectories(
     # Wait for session to complete (non-blocking, outside lock)
     await session_data.wait_for_finish()
 
+    await _maybe_score_session_with_judge(session_data)
+
     # Export interactions
     interactions = session_data.export_interactions(
         discount=request.discount,
@@ -969,10 +1209,11 @@ def main():
         # Run uvicorn directly (blocking)
         uvicorn.run(
             app,
-            host="0.0.0.0",
+            host=_server_host,
             port=_server_port,
             log_level="warning",
             timeout_keep_alive=300,
+            access_log=False,
         )
     except KeyboardInterrupt:
         logger.info("Shutting down proxy rollout server")

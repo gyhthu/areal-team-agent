@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 
 import asyncio
@@ -5,7 +7,6 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-import torch
 from pydantic import BaseModel
 
 from areal.experimental.openai.cache import InteractionCache
@@ -75,6 +76,7 @@ class SessionData:
         self._last_access_time = time.time()
         self._end_time = None
         self._lock = threading.Lock()
+        self._pending_interaction_id: str | None = None
 
     def update_last_access(self):
         """Update the last access time for this session."""
@@ -100,6 +102,25 @@ class SessionData:
     def completions(self):
         return self._completions
 
+    def attach_next_state_from_request(self, request: dict[str, Any]) -> None:
+        """Attach the current request's latest non-assistant message to the prior turn."""
+        next_state = _extract_next_state(request)
+        if next_state is None:
+            return
+        with self._lock:
+            pending_id = self._pending_interaction_id
+            if pending_id is None or pending_id not in self._completions:
+                return
+            self._completions[pending_id].next_state = next_state
+
+    def track_latest_interaction(self, previous_ids: set[str]) -> None:
+        """Remember the latest newly-created interaction for the next request."""
+        with self._lock:
+            for interaction_id in reversed(self._completions.keys()):
+                if interaction_id not in previous_ids:
+                    self._pending_interaction_id = interaction_id
+                    return
+
     async def wait_for_finish(self, timeout: float | None = None) -> bool:
         loop = asyncio.get_running_loop()
         deadline = time.monotonic() + timeout if timeout else None
@@ -120,6 +141,26 @@ class SessionData:
         return self.completions.export_interactions(style=style)
 
 
+def _extract_next_state(request: dict[str, Any]) -> dict[str, Any] | None:
+    messages = request.get("messages")
+    if isinstance(messages, list):
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            if message.get("role") == "assistant":
+                continue
+            return dict(message)
+
+    input_data = request.get("input")
+    if isinstance(input_data, str):
+        return {"role": "user", "content": input_data}
+    if isinstance(input_data, list):
+        for item in reversed(input_data):
+            if isinstance(item, dict):
+                return dict(item)
+    return None
+
+
 # =============================================================================
 # Serialization Helpers
 # =============================================================================
@@ -128,16 +169,27 @@ class SessionData:
 def serialize_interactions(
     interactions: dict[str, InteractionWithTokenLogpReward],
 ) -> dict[str, Any]:
-    """Serialize interactions for HTTP transport."""
+    """Serialize interactions into a json-compatible format for HTTP transport."""
+    from areal.infra.rpc.serialization import serialize_value
+
     result = {}
     for key, interaction in interactions.items():
-        tensor_dict = interaction.to_tensor_dict()
-        result[key] = {
-            "tensor_dict": {k: v.tolist() for k, v in tensor_dict.items()},
-            "reward": interaction.reward,
-            "interaction_id": interaction.interaction_id,
-        }
-    return result
+        if interaction.has_tensor_data:
+            result[key] = {
+                "tensor_dict": interaction.to_tensor_dict(),
+                "next_state": interaction.next_state,
+                "reward": interaction.reward,
+                "interaction_id": interaction.interaction_id,
+            }
+        else:
+            result[key] = {
+                "messages": interaction.messages,
+                "output_message_list": interaction.output_message_list,
+                "next_state": interaction.next_state,
+                "reward": interaction.reward,
+                "interaction_id": interaction.interaction_id,
+            }
+    return serialize_value(result)
 
 
 def deserialize_interactions(
@@ -145,14 +197,21 @@ def deserialize_interactions(
 ) -> dict[str, InteractionWithTokenLogpReward]:
     """Deserialize interactions from HTTP response."""
     from areal.experimental.openai.types import InteractionWithTokenLogpReward
+    from areal.infra.rpc.serialization import deserialize_value
 
+    data = deserialize_value(data)
     result = {}
     for key, item in data.items():
-        tensor_dict = {k: torch.tensor(v) for k, v in item["tensor_dict"].items()}
-        # Create a minimal InteractionWithTokenLogpReward with cached tensor dict
         interaction = InteractionWithTokenLogpReward()
-        interaction._cache = tensor_dict
+        if "tensor_dict" in item:
+            interaction._cache = item["tensor_dict"]
+            interaction.next_state = item.get("next_state")
+        else:
+            interaction.messages = item["messages"]
+            interaction.output_message_list = item["output_message_list"]
+            interaction.next_state = item.get("next_state")
         interaction.reward = item["reward"]
+        interaction.interaction_id = item["interaction_id"]
         result[key] = interaction
     return result
 
