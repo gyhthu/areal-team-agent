@@ -462,7 +462,6 @@ def _setup_openai_client():
         reasoning_parser=agent_cfg.reasoning_parser,
         engine_max_tokens=agent_cfg.engine_max_tokens,
         chat_template_type=agent_cfg.chat_template_type,
-        lora_name=getattr(config, "lora_name", None),
     )
     # Set session timeout from config
     _session_timeout_seconds = agent_cfg.session_timeout_seconds
