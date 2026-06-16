@@ -71,6 +71,18 @@ Given a full interaction trajectory, decide whether the assistant successfully h
 the user complete the task. Return only one JSON object: {"score": 1}, {"score": 0},
 or {"score": -1}. Use 1 for success, 0 for unclear/partial, and -1 for failure."""
 
+_RULE_FAILURE_PATTERNS = (
+    "traceback",
+    "exception",
+    "error:",
+    "failed",
+    "cannot",
+    "can't",
+    "unable to",
+    "i don't know",
+    "i do not know",
+)
+
 
 # =============================================================================
 # Warning Deduplication
@@ -271,16 +283,61 @@ def _parse_judge_score(text: str) -> float:
     return 0.0
 
 
+def _rule_reward_enabled() -> bool:
+    mode = os.environ.get("AREAL_PRM_RULE_REWARD_MODE", "basic").strip().lower()
+    return mode not in {"0", "false", "off", "disabled", "none"}
+
+
+def _has_assistant_output(session_data: SessionData) -> bool:
+    for interaction in session_data.completions.values():
+        for message in interaction.output_message_list or []:
+            content = _format_content(message.get("content", ""))
+            if content.strip():
+                return True
+    return False
+
+
+def _rule_based_reward(session_data: SessionData) -> float:
+    transcript = _session_transcript(session_data).lower()
+    if not transcript.strip() or not _has_assistant_output(session_data):
+        return -1.0
+    if any(pattern in transcript for pattern in _RULE_FAILURE_PATTERNS):
+        return -1.0
+    return 1.0
+
+
+def _maybe_score_session_with_rules(session_data: SessionData, reason: str) -> None:
+    if not _rule_reward_enabled():
+        logger.info(
+            "Rule reward disabled for session %s; leaving rewards unchanged",
+            session_data.session_id,
+        )
+        return
+    reward = _rule_based_reward(session_data)
+    session_data.completions.set_last_reward(reward)
+    logger.info(
+        "Rule reward assigned trajectory reward %.1f to session %s (%s)",
+        reward,
+        session_data.session_id,
+        reason,
+    )
+
+
 async def _maybe_score_session_with_judge(session_data: SessionData) -> None:
     """Assign a trajectory-level reward with an OpenAI-compatible judge if needed."""
-    chat_url = _judge_chat_url()
-    if not chat_url or len(session_data.completions) == 0:
+    if len(session_data.completions) == 0:
         return
     if any(interaction.reward is not None for interaction in session_data.completions.values()):
         return
 
+    chat_url = _judge_chat_url()
+    if not chat_url:
+        _maybe_score_session_with_rules(session_data, "judge URL not configured")
+        return
+
     transcript = _session_transcript(session_data)
     if not transcript.strip():
+        _maybe_score_session_with_rules(session_data, "empty transcript")
         return
 
     model = os.environ.get("AREAL_PRM_JUDGE_MODEL", "default")
@@ -318,10 +375,11 @@ async def _maybe_score_session_with_judge(session_data: SessionData) -> None:
         )
     except Exception as exc:
         logger.warning(
-            "Judge scoring failed for session %s; leaving rewards unchanged: %s",
+            "Judge scoring failed for session %s; falling back to rule reward: %s",
             session_data.session_id,
             exc,
         )
+        _maybe_score_session_with_rules(session_data, "judge failed")
 
 
 # =============================================================================

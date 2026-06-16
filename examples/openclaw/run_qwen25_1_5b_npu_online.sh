@@ -30,12 +30,14 @@ export AREAL_PRM_JUDGE_BASE_URL="${AREAL_PRM_JUDGE_BASE_URL:-}"
 export AREAL_PRM_JUDGE_API_KEY="${AREAL_PRM_JUDGE_API_KEY:-}"
 export AREAL_PRM_JUDGE_MODEL="${AREAL_PRM_JUDGE_MODEL:-default}"
 export AREAL_PRM_JUDGE_TIMEOUT="${AREAL_PRM_JUDGE_TIMEOUT:-30}"
+export AREAL_PRM_RULE_REWARD_MODE="${AREAL_PRM_RULE_REWARD_MODE:-basic}"
 export AREAL_PROVIDER_IDLE_TIMEOUT="${AREAL_PROVIDER_IDLE_TIMEOUT:-300}"
 export AREAL_PROVIDER_IDLE_CHECK_INTERVAL="${AREAL_PROVIDER_IDLE_CHECK_INTERVAL:-30}"
 
 echo "Use the gateway URL printed by AReaL as the provider baseUrl."
 echo "For OpenAI-compatible clients, use baseUrl=http://<gateway>/v1 and model=default."
 echo "If the client requires an apiKey, any placeholder is fine, e.g. ${PROVIDER_API_KEY}."
+echo "If no judge URL is configured, rule reward mode is ${AREAL_PRM_RULE_REWARD_MODE}."
 echo "Idle sessions auto-end after ${AREAL_PROVIDER_IDLE_TIMEOUT}s."
 
 python3 examples/openclaw/train.py \
