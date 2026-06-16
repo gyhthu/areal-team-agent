@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import json
+import re
 import traceback
 import uuid
 from typing import Any
@@ -11,6 +15,85 @@ from openai.types.responses.response_function_tool_call import ResponseFunctionT
 from areal.utils import logging
 
 logger = logging.getLogger("ToolCallParser")
+
+_QWEN_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+
+
+def _tool_names(tools: list[Any], use_responses: bool) -> set[str]:
+    names = set()
+    for tool in tools:
+        if use_responses:
+            name = tool.get("name") if isinstance(tool, dict) else None
+        else:
+            fn = tool.get("function", {}) if isinstance(tool, dict) else {}
+            name = fn.get("name") if isinstance(fn, dict) else None
+        if name:
+            names.add(name)
+    return names
+
+
+def _dump_arguments(arguments: Any) -> str:
+    if arguments is None:
+        return "{}"
+    if isinstance(arguments, str):
+        return arguments
+    return json.dumps(arguments, ensure_ascii=False)
+
+
+def _parse_qwen_xml_tool_calls(
+    content_text: str, tools: list[Any], use_responses: bool
+) -> tuple[
+    list[ChatCompletionMessageFunctionToolCall | ResponseFunctionToolCall] | None,
+    str,
+]:
+    """Fallback parser for Qwen XML-style <tool_call> blocks."""
+    matches = list(_QWEN_TOOL_CALL_RE.finditer(content_text))
+    if not matches:
+        return None, content_text
+
+    valid_tool_names = _tool_names(tools, use_responses)
+    tool_calls: list[ChatCompletionMessageFunctionToolCall | ResponseFunctionToolCall] = []
+
+    for match in matches:
+        payload = match.group(1).strip()
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse Qwen tool call payload: {payload}")
+            return None, content_text
+
+        call_items = parsed if isinstance(parsed, list) else [parsed]
+        for item in call_items:
+            if not isinstance(item, dict):
+                return None, content_text
+            fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+            name = item.get("name") or fn.get("name")
+            arguments = item.get("arguments", item.get("parameters", fn.get("arguments")))
+            if not name or (valid_tool_names and name not in valid_tool_names):
+                return None, content_text
+            arguments_str = _dump_arguments(arguments)
+            if use_responses:
+                tool_calls.append(
+                    ResponseFunctionToolCall(
+                        type="function_call",
+                        id=f"fc-{uuid.uuid4().hex[:24]}",
+                        call_id=f"call_{uuid.uuid4().hex[:24]}",
+                        name=name,
+                        arguments=arguments_str,
+                        status="completed",
+                    )
+                )
+            else:
+                tool_calls.append(
+                    ChatCompletionMessageFunctionToolCall(
+                        type="function",
+                        id=f"call_{uuid.uuid4().hex[:24]}",
+                        function=Function(name=name, arguments=arguments_str),
+                    )
+                )
+
+    content_without_calls = _QWEN_TOOL_CALL_RE.sub("", content_text).strip()
+    return tool_calls or None, content_without_calls
 
 
 def _detect_think_and_return_ori_think(
@@ -54,6 +137,7 @@ def process_tool_calls(
     str,
 ]:
     """Process tool calls in the response"""
+    raw_tools = tools
     from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
     from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
     from sglang.srt.function_call.function_call_parser import FunctionCallParser
@@ -120,7 +204,20 @@ def process_tool_calls(
         except Exception as e:
             logger.error(f"Tool call parsing error: {e}")
             traceback.print_exc()
+            tool_calls, content_text = _parse_qwen_xml_tool_calls(
+                content_text, raw_tools, use_responses
+            )
+            if tool_calls:
+                return tool_calls, reasoning_text + content_text, finish_reason
             # Return error but don't fail the whole request
             return None, text, finish_reason
+
+    tool_calls, content_text = _parse_qwen_xml_tool_calls(
+        content_text, raw_tools, use_responses
+    )
+    if tool_calls:
+        if finish_reason == "stop":
+            finish_reason = "tool_calls"
+        return tool_calls, reasoning_text + content_text, finish_reason
 
     return None, text, finish_reason
