@@ -74,5 +74,4 @@ python3 examples/openclaw/train.py \
   +actor.scheduling_spec.0.env_vars.AREAL_PRM_RULE_REWARD_MODE="${AREAL_PRM_RULE_REWARD_MODE}" \
   +actor.scheduling_spec.0.env_vars.AREAL_PROVIDER_IDLE_TIMEOUT="${AREAL_PROVIDER_IDLE_TIMEOUT}" \
   +actor.scheduling_spec.0.env_vars.AREAL_PROVIDER_IDLE_CHECK_INTERVAL="${AREAL_PROVIDER_IDLE_CHECK_INTERVAL}" \
-  rollout.agent.admin_api_key="${ADMIN_API_KEY}" \
-  rollout.admin_api_key="${ADMIN_API_KEY}"
+  rollout.openai.admin_api_key="${ADMIN_API_KEY}"
