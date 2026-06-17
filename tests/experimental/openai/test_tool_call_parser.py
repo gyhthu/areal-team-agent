@@ -241,3 +241,27 @@ def test_process_tool_calls_falls_back_when_sglang_returns_empty(monkeypatch):
     assert len(tool_calls) == 1
     assert tool_calls[0].function.name == "search"
     assert "<tool_call>" not in new_text
+
+
+def test_process_tool_calls_falls_back_for_unclosed_thinking_block():
+    text = (
+        "<think>\n"
+        "I should inspect the current directory.\n"
+        '<tool_call>\n{"name": "search", "arguments": {"query": "current directory"}}\n'
+        "</tool_call>"
+    )
+
+    tool_calls, new_text, new_finish_reason = process_tool_calls(
+        text=text,
+        tools=tools,
+        tool_call_parser="qwen25",
+        reasoning_parser="qwen3",
+        finish_reason="stop",
+        use_responses=False,
+    )
+
+    assert new_finish_reason == "tool_calls"
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function.name == "search"
+    assert "<tool_call>" not in new_text

@@ -129,6 +129,20 @@ def _parse_qwen_xml_tool_calls(
     return tool_calls or None, content_without_calls
 
 
+def _parse_qwen_xml_tool_calls_from_full_text(
+    text: str, tools: list[Any], use_responses: bool
+) -> tuple[
+    list[ChatCompletionMessageFunctionToolCall | ResponseFunctionToolCall] | None,
+    str,
+]:
+    """Parse XML tool calls from full text, including unterminated thinking."""
+    tool_calls, content_text = _parse_qwen_xml_tool_calls(text, tools, use_responses)
+    if not tool_calls:
+        return None, text
+    content_text = content_text.replace("<think>", "").replace("</think>", "").strip()
+    return tool_calls, content_text
+
+
 def _detect_think_and_return_ori_think(
     text: str, think_start_token: str, think_end_token: str
 ) -> tuple[str, str]:
@@ -193,6 +207,14 @@ def process_tool_calls(
             if finish_reason == "stop":
                 finish_reason = "tool_calls"
             return tool_calls, reasoning_text + content_text, finish_reason
+        if "<tool_call>" in text and "<tool_call>" not in content_text:
+            tool_calls, content_text = _parse_qwen_xml_tool_calls_from_full_text(
+                text, raw_tools, use_responses
+            )
+            if tool_calls:
+                if finish_reason == "stop":
+                    finish_reason = "tool_calls"
+                return tool_calls, content_text, finish_reason
         return None, text, finish_reason
 
     if use_responses:
@@ -286,6 +308,12 @@ def process_tool_calls(
             )
             if tool_calls:
                 return tool_calls, reasoning_text + content_text, finish_reason
+            if "<tool_call>" in text and "<tool_call>" not in content_text:
+                tool_calls, content_text = _parse_qwen_xml_tool_calls_from_full_text(
+                    text, raw_tools, use_responses
+                )
+                if tool_calls:
+                    return tool_calls, content_text, finish_reason
             # Return error but don't fail the whole request
             return None, text, finish_reason
 
@@ -296,5 +324,20 @@ def process_tool_calls(
         if finish_reason == "stop":
             finish_reason = "tool_calls"
         return tool_calls, reasoning_text + content_text, finish_reason
+
+    if "<tool_call>" in text and "<tool_call>" not in content_text:
+        if _debug_enabled():
+            logger.warning(
+                "No tool call found in normal content; trying Qwen XML fallback "
+                "on full text. This usually means the model emitted a tool call "
+                "inside an unterminated thinking block."
+            )
+        tool_calls, content_text = _parse_qwen_xml_tool_calls_from_full_text(
+            text, raw_tools, use_responses
+        )
+        if tool_calls:
+            if finish_reason == "stop":
+                finish_reason = "tool_calls"
+            return tool_calls, content_text, finish_reason
 
     return None, text, finish_reason
