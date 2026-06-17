@@ -1,4 +1,7 @@
 # Tools constructed as Iterable[ChatCompletionToolParam]
+import sys
+import types
+
 from openai.types.chat import ChatCompletionToolParam
 
 from areal.experimental.openai.tool_call_parser import process_tool_calls
@@ -154,3 +157,87 @@ def test_process_tool_calls_qwen25_chat_completions_with_tool_call_in_thinking()
     )
     # Ensure the returned text no longer contains raw <tool_call> blocks
     assert "<tool_call>" in new_text
+
+
+def test_process_tool_calls_falls_back_when_sglang_returns_empty(monkeypatch):
+    """
+    SGLang's parser can detect Qwen XML but fail to extract call info for some
+    client-provided tool schemas. In that case the XML fallback must still run.
+    """
+
+    class EmptySGLangParser:
+        def __init__(self, tools, tool_call_parser):
+            pass
+
+        def has_tool_call(self, content_text):
+            return True
+
+        def parse_non_stream(self, content_text):
+            return content_text, []
+
+    class SglFunction:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class SglTool:
+        def __init__(self, type, function):
+            self.type = type
+            self.function = function
+
+    class ReasoningParser:
+        def __init__(self, reasoning_parser):
+            self.detector = types.SimpleNamespace(
+                think_start_token="<think>",
+                think_end_token="</think>",
+            )
+
+    protocol_module = types.ModuleType("sglang.srt.entrypoints.openai.protocol")
+    protocol_module.Function = SglFunction
+    protocol_module.Tool = SglTool
+    function_parser_module = types.ModuleType(
+        "sglang.srt.function_call.function_call_parser"
+    )
+    function_parser_module.FunctionCallParser = EmptySGLangParser
+    reasoning_parser_module = types.ModuleType("sglang.srt.parser.reasoning_parser")
+    reasoning_parser_module.ReasoningParser = ReasoningParser
+
+    for module_name in [
+        "sglang",
+        "sglang.srt",
+        "sglang.srt.entrypoints",
+        "sglang.srt.entrypoints.openai",
+        "sglang.srt.function_call",
+        "sglang.srt.parser",
+    ]:
+        monkeypatch.setitem(sys.modules, module_name, types.ModuleType(module_name))
+    monkeypatch.setitem(
+        sys.modules, "sglang.srt.entrypoints.openai.protocol", protocol_module
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.srt.function_call.function_call_parser",
+        function_parser_module,
+    )
+    monkeypatch.setitem(
+        sys.modules, "sglang.srt.parser.reasoning_parser", reasoning_parser_module
+    )
+
+    text = (
+        '<tool_call>\n{"name": "search", "arguments": {"query": "current directory"}}\n'
+        "</tool_call>"
+    )
+
+    tool_calls, new_text, new_finish_reason = process_tool_calls(
+        text=text,
+        tools=tools,
+        tool_call_parser="qwen25",
+        reasoning_parser="qwen3",
+        finish_reason="stop",
+        use_responses=False,
+    )
+
+    assert new_finish_reason == "tool_calls"
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function.name == "search"
+    assert "<tool_call>" not in new_text

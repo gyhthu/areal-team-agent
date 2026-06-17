@@ -18,10 +18,18 @@ from areal.utils import logging
 logger = logging.getLogger("ToolCallParser")
 
 _QWEN_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
+_DEBUG_PREVIEW_CHARS = 500
 
 
 def _debug_enabled() -> bool:
     return os.getenv("AREAL_OPENAI_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _preview(text: str, limit: int = _DEBUG_PREVIEW_CHARS) -> str:
+    text = text.replace("\n", "\\n")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...<truncated>"
 
 
 def _tool_names(tools: list[Any], use_responses: bool) -> set[str]:
@@ -60,7 +68,8 @@ def _parse_qwen_xml_tool_calls(
     if _debug_enabled():
         logger.info(
             f"Qwen XML fallback saw {len(matches)} tool_call block(s); "
-            f"valid_tools={sorted(valid_tool_names)} use_responses={use_responses}"
+            f"valid_tools={sorted(valid_tool_names)} use_responses={use_responses} "
+            f"content_preview={_preview(content_text)}"
         )
     tool_calls: list[ChatCompletionMessageFunctionToolCall | ResponseFunctionToolCall] = []
 
@@ -69,12 +78,19 @@ def _parse_qwen_xml_tool_calls(
         try:
             parsed = json.loads(payload)
         except json.JSONDecodeError:
-            logger.warning(f"Failed to parse Qwen tool call payload: {payload}")
+            logger.warning(
+                f"Failed to parse Qwen tool call payload: {_preview(payload)}"
+            )
             return None, content_text
 
         call_items = parsed if isinstance(parsed, list) else [parsed]
         for item in call_items:
             if not isinstance(item, dict):
+                if _debug_enabled():
+                    logger.warning(
+                        f"Qwen XML fallback rejected non-object tool call item: "
+                        f"{_preview(str(item))}"
+                    )
                 return None, content_text
             fn = item.get("function") if isinstance(item.get("function"), dict) else {}
             name = item.get("name") or fn.get("name")
@@ -155,10 +171,29 @@ def process_tool_calls(
 ]:
     """Process tool calls in the response"""
     raw_tools = tools
-    from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
-    from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
-    from sglang.srt.function_call.function_call_parser import FunctionCallParser
-    from sglang.srt.parser.reasoning_parser import ReasoningParser
+    try:
+        from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
+        from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
+        from sglang.srt.function_call.function_call_parser import FunctionCallParser
+        from sglang.srt.parser.reasoning_parser import ReasoningParser
+    except ModuleNotFoundError:
+        if _debug_enabled():
+            logger.warning(
+                "SGLang parser is unavailable; using Qwen XML fallback only."
+            )
+        reasoning_text, content_text = _detect_think_and_return_ori_think(
+            text,
+            "<think>",
+            "</think>",
+        )
+        tool_calls, content_text = _parse_qwen_xml_tool_calls(
+            content_text, raw_tools, use_responses
+        )
+        if tool_calls:
+            if finish_reason == "stop":
+                finish_reason = "tool_calls"
+            return tool_calls, reasoning_text + content_text, finish_reason
+        return None, text, finish_reason
 
     if use_responses:
         tools = [
@@ -220,9 +255,29 @@ def process_tool_calls(
             if _debug_enabled():
                 logger.info(
                     f"SGLang parser parsed {len(tool_calls)} tool call(s); "
-                    f"use_responses={use_responses}"
+                    f"use_responses={use_responses} "
+                    f"remaining_has_xml={'<tool_call>' in content_text}"
                 )
-            return tool_calls, reasoning_text + content_text, finish_reason
+            if tool_calls and "<tool_call>" not in content_text:
+                return tool_calls, reasoning_text + content_text, finish_reason
+
+            if _debug_enabled():
+                logger.warning(
+                    f"SGLang parser result is incomplete; "
+                    f"tool_calls={len(tool_calls)} "
+                    f"remaining_has_xml={'<tool_call>' in content_text}. "
+                    "Trying Qwen XML fallback."
+                )
+            fallback_tool_calls, fallback_content_text = _parse_qwen_xml_tool_calls(
+                content_text, raw_tools, use_responses
+            )
+            if fallback_tool_calls:
+                return (
+                    fallback_tool_calls,
+                    reasoning_text + fallback_content_text,
+                    finish_reason,
+                )
+            return tool_calls or None, reasoning_text + content_text, finish_reason
         except Exception as e:
             logger.error(f"Tool call parsing error: {e}")
             traceback.print_exc()
