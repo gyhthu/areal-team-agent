@@ -12,7 +12,7 @@ import re
 import secrets
 import threading
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -25,11 +25,12 @@ from litellm.llms.anthropic.experimental_pass_through.adapters.transformation im
     AnthropicAdapter,
 )
 from litellm.types.utils import ModelResponse as LitellmModelResponse
+from pydantic import BaseModel
+
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai.types.chat.completion_create_params import CompletionCreateParams
 from openai.types.responses import Response
 from openai.types.responses.response_create_params import ResponseCreateParams
-from pydantic import BaseModel
 
 from areal.api.cli_args import NameResolveConfig
 from areal.experimental.openai.client import ArealOpenAI
@@ -95,6 +96,32 @@ def _model_field_default(model: BaseModel, key: str) -> Any:
     if fields is not None:
         return fields[key].default
     return type(model).__fields__[key].default
+
+
+def _materialize_request_value(value: Any) -> Any:
+    """Convert pydantic iterator-backed request values into plain containers."""
+    if isinstance(value, BaseModel):
+        return _model_to_dict(value)
+    if isinstance(value, Mapping):
+        return {k: _materialize_request_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_materialize_request_value(v) for v in value]
+    if isinstance(value, tuple):
+        return [_materialize_request_value(v) for v in value]
+    if isinstance(value, (str, bytes, bytearray)):
+        return value
+    if isinstance(value, Iterable):
+        return [_materialize_request_value(v) for v in value]
+    return value
+
+
+def _safe_len(value: Any) -> int | str:
+    if value is None:
+        return 0
+    try:
+        return len(value)
+    except TypeError:
+        return "n/a"
 
 
 # =============================================================================
@@ -751,7 +778,8 @@ async def _call_client_create(
         if k not in areal_client_ignored_args and k not in areal_client_disallowed_args
     )
 
-    kwargs = _model_to_dict(request) if isinstance(request, BaseModel) else dict(request)
+    raw_kwargs = _model_to_dict(request) if isinstance(request, BaseModel) else dict(request)
+    kwargs = {k: _materialize_request_value(v) for k, v in raw_kwargs.items()}
     dropped_args = []
     for k, v in kwargs.items():
         if k not in areal_client_allowed_args:
@@ -799,9 +827,9 @@ async def _call_client_create(
         messages = kwargs.get("messages") or kwargs.get("input")
         logger.info(
             f"OpenAI proxy request; session={session_id} stream={stream} "
-            f"has_tools={bool(tools)} tool_count={len(tools or [])} "
+            f"has_tools={bool(tools)} tool_count={_safe_len(tools)} "
             f"tool_choice={kwargs.get('tool_choice')!r} "
-            f"message_count={len(messages) if isinstance(messages, list) else 'n/a'} "
+            f"message_count={_safe_len(messages) if isinstance(messages, list) else 'n/a'} "
             f"keys={sorted(kwargs.keys())}"
         )
 

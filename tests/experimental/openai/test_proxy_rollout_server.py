@@ -165,6 +165,76 @@ class TestEndSessionInteractionCount:
 
 
 # ---------------------------------------------------------------------------
+# Tests: OpenAI request normalization
+# ---------------------------------------------------------------------------
+
+
+class _NoLenIterable:
+    """Iterable that mimics pydantic-core validator iterators."""
+
+    def __init__(self, values):
+        self._values = values
+
+    def __iter__(self):
+        return iter(self._values)
+
+
+class TestOpenAIRequestNormalization:
+    @pytest.mark.asyncio
+    async def test_materializes_iterator_backed_tools_before_logging(
+        self, monkeypatch
+    ):
+        """Iterator-backed request arrays should not fail debug logging."""
+        session_id = "session-with-iterators"
+        srv._session_cache[session_id] = SessionData(session_id=session_id)
+        monkeypatch.setattr(srv, "_openai_client", object())
+        monkeypatch.setenv("AREAL_OPENAI_DEBUG", "1")
+
+        async def fake_create(
+            messages,
+            tools,
+            temperature,
+            top_p,
+            areal_cache,
+            stream=False,
+        ):
+            assert isinstance(messages, list)
+            assert isinstance(tools, list)
+            assert len(tools) == 1
+            return {
+                "messages": messages,
+                "tools": tools,
+                "temperature": temperature,
+                "top_p": top_p,
+                "stream": stream,
+                "cache": areal_cache,
+            }
+
+        request = {
+            "model": "default",
+            "messages": _NoLenIterable([{"role": "user", "content": "hello"}]),
+            "tools": _NoLenIterable(
+                [
+                    {
+                        "type": "function",
+                        "function": {"name": "search", "parameters": {}},
+                    }
+                ]
+            ),
+            "stream": True,
+        }
+
+        result = await srv._call_client_create(
+            create_fn=fake_create,
+            request=request,
+            session_id=session_id,
+            stream=True,
+        )
+
+        assert result["stream"] is True
+
+
+# ---------------------------------------------------------------------------
 # Tests: export_trajectories (requires session_id + admin auth)
 # ---------------------------------------------------------------------------
 
